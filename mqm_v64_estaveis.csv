@@ -1,0 +1,6 @@
+Ativo;Horizonte;Regime;HitRate;Operacoes;ProfitFactor;PF_Folds_Mean;PF_Folds_Std;N_Folds;Instavel;Retorno_pct;MaxDrawdown;Sharpe;Capital_Final;Score;Valido;Selic_Focus;IPCA_Focus
+ITUB4;D28;LowVol;46.34;287;2.994;2.454;2.352;5;False;163.52;-17.34;4.166;263521.13;5.78;True;13.25;5.1
+PETR4;D60;LowVol;51.44;313;2.13;1.257;0.315;5;False;1631.99;-18.25;4.256;1731993.09;4.663;True;13.25;5.1
+GGBR4;D60;LowVol;51.26;515;1.724;3.419;3.389;10;False;1339.54;-56.39;3.087;1439542.29;2.728;True;13.25;5.1
+MGLU3;D60;LowVol;45.61;228;1.882;0.213;0.102;3;False;620.68;-43.84;2.906;720677.31;2.495;True;13.25;5.1
+PETR4;D5;LowVol;56.14;611;1.463;1.888;1.335;12;False;96.86;-15.14;2.361;196860.95;1.939;True;13.25;5.1
