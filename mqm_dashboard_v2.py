@@ -209,51 +209,117 @@ def normalizar(series):
     return (series / s.iloc[0]) * 100
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+def _get_api_key():
+    """
+    Busca ANTHROPIC_API_KEY em 3 lugares, nessa ordem:
+    1. Streamlit Secrets (Streamlit Cloud)
+    2. Variável de ambiente do sistema
+    3. Arquivo .env na pasta do projeto (via python-dotenv)
+    """
+    import os as _os
+
+    # 1. Streamlit Secrets
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+        if key: return str(key).strip()
+    except Exception:
+        pass
+
+    # 2. Variável de ambiente já carregada
+    key = _os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if key: return key
+
+    # 3. Arquivo .env — tenta python-dotenv primeiro, depois leitura manual
+    env_path = os.path.join(SCRIPT_DIR, ".env")
+    if os.path.exists(env_path):
+        # Tenta python-dotenv
+        try:
+            from dotenv import dotenv_values
+            vals = dotenv_values(env_path)
+            key  = vals.get("ANTHROPIC_API_KEY", "").strip()
+            if key: return key
+        except ImportError:
+            pass
+
+        # Fallback: leitura manual linha a linha
+        try:
+            with open(env_path, "r", encoding="utf-8-sig") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("ANTHROPIC_API_KEY"):
+                        # Aceita tanto = quanto : como separador, com ou sem espaços
+                        for sep in ["=", ":"]:
+                            if sep in line:
+                                key = line.split(sep, 1)[1].strip().strip('"').strip("'")
+                                if key: return key
+        except Exception:
+            pass
+
+    return None
+
+
 def gerar_analise_ia(ativo, sinal, rec, pf, hr, regime, retorno, dd, horizonte):
     """
-    Gera análise contextual do ativo via Claude API.
-    Combina dados técnicos do modelo + busca de contexto de mercado.
-    Cache de 30 min para não sobrecarregar a API.
+    Gera análise contextual via Claude API.
+    Funciona no Streamlit Cloud (via secrets) e localmente (via .env ou env var).
+    Cache de 30 min.
     """
+    api_key = _get_api_key()
+    if not api_key:
+        return "⚠️ API key não configurada. Veja as instruções abaixo."
+
     try:
         import requests as req
-        prompt = f"""Você é um analista de mercado financeiro brasileiro experiente.
-Analise o ativo {ativo} com base nos seguintes dados do modelo quantitativo MQM:
 
-- Sinal atual: {sinal}
-- Recomendação: {rec}
-- Horizonte: {horizonte}
-- Regime de volatilidade: {regime}
-- Profit Factor histórico: {pf:.2f}
-- Taxa de acerto histórica: {hr:.1f}%
-- Retorno simulado: {retorno}
-- Máximo Drawdown: {dd}
+        NOMES = {
+            "PETR4":"Petrobras","VALE3":"Vale","ITUB4":"Itaú Unibanco",
+            "BBAS3":"Banco do Brasil","MGLU3":"Magazine Luiza","SUZB3":"Suzano",
+            "ABEV3":"Ambev","VIVT3":"Vivo/Telefônica","GGBR4":"Gerdau",
+            "LREN3":"Lojas Renner","BBDC4":"Bradesco","WEGE3":"WEG",
+        }
+        nome_completo = NOMES.get(ativo, ativo)
 
-Escreva uma análise curta e objetiva (máximo 4 linhas) explicando:
-1. O que a tendência técnica indica
-2. Qual o principal risco ou oportunidade no momento
-3. Contexto macroeconômico/setorial relevante para esse ativo agora (Brasil 2025-2026: Selic em 13.25%, dólar alto, commodities, etc.)
+        prompt = f"""Você é um analista sênior de mercado financeiro brasileiro.
 
-Seja específico para {ativo}. Não repita os números — interprete-os.
-Escreva em português, tom profissional mas acessível."""
+Analise {nome_completo} ({ativo}) com base nos dados do modelo quantitativo MQM:
+- Sinal: {sinal} | Horizonte: {horizonte} | Regime: {regime}
+- Recomendação do modelo: {rec}
+- Profit Factor: {pf:.2f} | Taxa de acerto: {hr:.1f}% | Max Drawdown: {dd}
+
+Escreva em 3-4 frases objetivas:
+1. O que o sinal técnico indica para {nome_completo} neste momento
+2. Principal risco ou catalisador para o horizonte de {horizonte}
+3. Contexto setorial/macro relevante (Brasil jun/2026: Selic 13.25%, câmbio, setor específico do ativo)
+
+Seja direto e específico. Não repita os números — interprete-os. Português profissional."""
 
         resp = req.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
             json={
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 300,
+                "max_tokens": 350,
                 "messages": [{"role": "user", "content": prompt}]
             },
-            timeout=20
+            timeout=25
         )
         if resp.status_code == 200:
-            data = resp.json()
-            return data["content"][0]["text"].strip()
-        return None
-    except Exception:
-        return None
+            return resp.json()["content"][0]["text"].strip()
+        else:
+            # Retorna detalhes do erro para debug
+            try:
+                err_body = resp.json()
+                err_msg  = err_body.get("error", {}).get("message", resp.text[:200])
+            except Exception:
+                err_msg = resp.text[:200]
+            return f"__DEBUG__ status={resp.status_code} | {err_msg}"
+    except Exception as e:
+        import traceback
+        return f"__DEBUG__ {type(e).__name__}: {str(e)[:200]}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -494,42 +560,82 @@ with tab1:
         with col_ia1:
             ativo_ia = st.selectbox("Ativo para análise:", opcoes_ia, key="sel_ia")
         with col_ia2:
-            gerar = st.button("🔍 Gerar análise", key="btn_ia", use_container_width=True)
+            api_key_status = "✅ API key encontrada" if _get_api_key() else "❌ API key não encontrada"
+            gerar = st.button(f"🔍 Gerar análise  ({api_key_status})", key="btn_ia", use_container_width=True)
 
         if gerar and ativo_ia:
-            row_ia = next((r for r in rows if r["Ativo"] == ativo_ia), None)
-            if row_ia:
-                sinal_ia   = SINAIS.get(ativo_ia, ("NEUTRO",0.5,"LowVol"))[0]
-                rec_ia     = row_ia["Recomendação"]
-                pf_ia      = float(row_ia["PF"]) if row_ia["PF"] != "—" else 1.0
-                hr_ia      = float(row_ia["HR%"])
-                regime_ia  = row_ia["Regime"]
-                retorno_ia = row_ia["Retorno%"]
-                dd_ia      = row_ia["MaxDD%"]
-                hor_ia     = row_ia["Horizonte"]
+            import json as _json
+            sinal_base  = SINAIS.get(ativo_ia, ("NEUTRO",0.5,"LowVol"))[0]
+            sinal_color = "#22c55e" if sinal_base=="COMPRA" else ("#f87171" if sinal_base=="VENDA" else "#94a3b8")
 
-                with st.spinner(f"Analisando {ativo_ia}..."):
-                    analise = gerar_analise_ia(
-                        ativo_ia, sinal_ia, rec_ia, pf_ia, hr_ia,
-                        regime_ia, retorno_ia, dd_ia, hor_ia
+            # Coleta TODOS os cenários do ativo (todos horizontes e regimes)
+            cenarios_ativo = []
+            for r_ia in rows:
+                if r_ia["Ativo"] == ativo_ia:
+                    pf_c  = float(r_ia["PF"]) if r_ia["PF"] != "—" else 0.0
+                    hr_c  = float(r_ia["HR%"])
+                    rec_c = rec_label(sinal_base, pf_c, hr_c, r_ia["Status"] != "✓ estável")
+                    cenarios_ativo.append({
+                        "horizonte": r_ia["Horizonte"],
+                        "regime":    r_ia["Regime"],
+                        "sinal":     sinal_base,
+                        "rec":       rec_c,
+                        "pf":        r_ia["PF"],
+                        "hr":        r_ia["HR%"],
+                        "dd":        r_ia["MaxDD%"],
+                    })
+
+            with st.spinner(f"Analisando {ativo_ia} em {len(cenarios_ativo)} cenário(s)..."):
+                analise = gerar_analise_ia(
+                    ativo_ia,
+                    _json.dumps(cenarios_ativo, ensure_ascii=False)
+                )
+
+            if analise:
+                if analise.startswith("__DEBUG__"):
+                    st.error(f"Erro técnico: {analise.replace('__DEBUG__', '').strip()}")
+                    st.info("Verifique se o arquivo .env está na pasta do projeto com ANTHROPIC_API_KEY=sk-ant-...")
+                else:
+                    cenarios_str = " &nbsp;|&nbsp; ".join(
+                        f"{c['horizonte']} {c['regime']} → {c['rec']}"
+                        for c in cenarios_ativo
                     )
-
-                if analise:
-                    sinal_color = "#22c55e" if sinal_ia=="COMPRA" else ("#f87171" if sinal_ia=="VENDA" else "#94a3b8")
                     st.markdown(f"""
                     <div style="background:rgba(15,23,42,0.8);border:1px solid #1e3a5f;
                         border-left:4px solid {sinal_color};border-radius:10px;
                         padding:16px 20px;margin:8px 0">
-                      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:8px">
-                        📋 {ativo_ia} · {hor_ia} · {rec_ia}
+                      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:6px">
+                        📋 {ativo_ia} — {len(cenarios_ativo)} horizonte(s) analisado(s)
+                      </div>
+                      <div style="font-size:11px;color:#475569;margin-bottom:10px">
+                        {cenarios_str}
                       </div>
                       <div style="font-size:13px;color:#cbd5e1;line-height:1.7">{analise}</div>
                       <div style="font-size:10px;color:#334155;margin-top:8px">
                         Gerado por IA · Não constitui recomendação de investimento · {datetime.now().strftime("%d/%m/%Y %H:%M")}
                       </div>
                     </div>""", unsafe_allow_html=True)
-                else:
-                    st.info("Análise não disponível no momento. Verifique a conexão com a API.")
+            else:
+                st.warning("Análise não gerada.")
+
+
+        # Instrução de configuração da API key (aparece só se key não estiver configurada)
+        if not _get_api_key():
+            with st.expander("⚙️ Como configurar a API key para análise de IA"):
+                st.markdown("""
+**Opção A — Streamlit Cloud (recomendado para produção):**
+1. No painel do app em share.streamlit.io, vá em **Settings → Secrets**
+2. Adicione:
+```toml
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+**Opção B — Rodando localmente:**
+1. Crie um arquivo `.env` na pasta do projeto
+2. Adicione a linha: `ANTHROPIC_API_KEY=sk-ant-...`
+
+Obtenha sua chave em: https://console.anthropic.com
+                """)
 
         st.divider()
 
