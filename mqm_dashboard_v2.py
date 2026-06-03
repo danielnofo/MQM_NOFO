@@ -16,7 +16,7 @@ st.set_page_config(
     page_title="MQM — Motor Quantitativo de Mercado",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ── CSS mínimo apenas para visual
@@ -26,7 +26,7 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .block-container { padding-top: 1.2rem !important; }
 header { visibility: hidden; }
-[data-testid="stSidebar"] { display: none !important; }
+[data-testid="stSidebar"] { min-width: 280px !important; max-width: 280px !important; }
 
 .pill  { display:inline-block; padding:3px 12px; border-radius:20px;
          font-size:12px; font-weight:600; }
@@ -209,6 +209,53 @@ def normalizar(series):
     return (series / s.iloc[0]) * 100
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def gerar_analise_ia(ativo, sinal, rec, pf, hr, regime, retorno, dd, horizonte):
+    """
+    Gera análise contextual do ativo via Claude API.
+    Combina dados técnicos do modelo + busca de contexto de mercado.
+    Cache de 30 min para não sobrecarregar a API.
+    """
+    try:
+        import requests as req
+        prompt = f"""Você é um analista de mercado financeiro brasileiro experiente.
+Analise o ativo {ativo} com base nos seguintes dados do modelo quantitativo MQM:
+
+- Sinal atual: {sinal}
+- Recomendação: {rec}
+- Horizonte: {horizonte}
+- Regime de volatilidade: {regime}
+- Profit Factor histórico: {pf:.2f}
+- Taxa de acerto histórica: {hr:.1f}%
+- Retorno simulado: {retorno}
+- Máximo Drawdown: {dd}
+
+Escreva uma análise curta e objetiva (máximo 4 linhas) explicando:
+1. O que a tendência técnica indica
+2. Qual o principal risco ou oportunidade no momento
+3. Contexto macroeconômico/setorial relevante para esse ativo agora (Brasil 2025-2026: Selic em 13.25%, dólar alto, commodities, etc.)
+
+Seja específico para {ativo}. Não repita os números — interprete-os.
+Escreva em português, tom profissional mas acessível."""
+
+        resp = req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 300,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=20
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["content"][0]["text"].strip()
+        return None
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────
 # LOAD
 # ─────────────────────────────────────────────────────────────
@@ -287,36 +334,63 @@ st.divider()
 # TABS
 # ─────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR — FILTROS
+# ─────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("### 🎛️ Filtros")
+    st.divider()
+
+    f_ativo = st.multiselect(
+        "Ativo", ativos_list, default=ativos_list,
+        help="Selecione um ou mais ativos para filtrar"
+    )
+    f_hor = st.multiselect(
+        "Horizonte", ["D5","D14","D28","D60"],
+        default=["D5","D14","D28","D60"],
+        help="D5=1 semana · D14=3 semanas · D28=1 mês · D60=3 meses"
+    )
+    f_reg = st.multiselect(
+        "Regime", ["LowVol","HighVol"],
+        default=["LowVol","HighVol"],
+        help="LowVol = mercado calmo · HighVol = mercado agitado"
+    )
+
+    st.markdown("**Métricas mínimas**")
+    pf_min = st.slider("Profit Factor mín.", 1.0, 10.0, 1.2, 0.1,
+        help="Filtra apenas combinações com PF acima deste valor")
+    sh_min = st.slider("Sharpe mín.", 0.0, 10.0, 0.0, 0.5,
+        help="Filtra pelo índice de Sharpe mínimo")
+    hr_min = st.slider("Hit Rate% mín.", 0.0, 100.0, 0.0, 5.0,
+        help="Filtra pela taxa de acerto mínima")
+
+    st.markdown("**Qualidade & Sinal**")
+    f_est = st.selectbox(
+        "Status do modelo",
+        ["Todos","✓ Estável","⚠ Instável"],
+        help="Estável = PF consistente entre períodos diferentes"
+    )
+    REC_OPTS = ["Todas","🟢 COMPRA FORTE","🟩 COMPRA MODERADA","🟡 COMPRA C/ RISCO",
+                "⬜ NÃO COMPRAR","🟠 VENDA RISCO","🔴 VENDA URGENTE"]
+    f_rec = st.selectbox(
+        "Recomendação",
+        REC_OPTS,
+        help="Filtra pelo tipo de recomendação do modelo"
+    )
+
+    st.divider()
+    st.caption("MQM v6.4 · Não constitui recomendação de investimento")
+
+
 tab1, tab2, tab3 = st.tabs(["📊 Combinações & Gráfico", "❓ Guia das colunas", "🎯 Sizing"])
 
 # ═══════════════════════════════════════
 with tab1:
 
-    # ── FILTROS NATIVOS — todos inline
-    st.markdown("**Filtros**")
-    f1,f2,f3,f4,f5,f6,f7 = st.columns([1.4,1.2,1,0.8,0.8,0.8,0.8])
-    with f1:
-        f_ativo = st.multiselect("Ativo", ativos_list, default=ativos_list)
-    with f2:
-        f_hor = st.multiselect("Horizonte", ["D5","D14","D28","D60"],
-                                default=["D5","D14","D28","D60"])
-    with f3:
-        f_reg = st.multiselect("Regime", ["LowVol","HighVol"],
-                                default=["LowVol","HighVol"])
-    with f4:
-        pf_min = st.number_input("PF mín.", 1.0, 15.0, 1.2, 0.1)
-    with f5:
-        sh_min = st.number_input("Sharpe mín.", 0.0, 12.0, 0.0, 0.5)
-    with f6:
-        hr_min = st.number_input("HR% mín.", 0.0, 100.0, 0.0, 5.0)
-    with f7:
-        f_est = st.selectbox("Status", ["Todos","✓ Estável","⚠ Instável"])
-
-    f8, f9 = st.columns([2, 5])
-    with f8:
-        REC_OPTS = ["Todas","🟢 COMPRA FORTE","🟩 COMPRA MODERADA","🟡 COMPRA C/ RISCO",
-                    "⬜ NÃO COMPRAR","🟠 VENDA RISCO","🔴 VENDA URGENTE"]
-        f_rec = st.selectbox("Recomendação", REC_OPTS)
+    # ── Filtros definidos na sidebar (ver bloco with st.sidebar acima)
+    # As variáveis f_ativo, f_hor, f_reg, pf_min, sh_min, hr_min, f_est, f_rec
+    # já foram definidas antes desta tab
 
     # ── APPLY
     df = df_all.copy()
@@ -409,7 +483,55 @@ with tab1:
             hide_index=True,
         )
 
-        st.caption("💡 Passe o mouse sobre o nome de cada coluna para ver a explicação. Clique em uma linha para selecionar.")
+        st.caption("💡 Passe o mouse sobre o nome de cada coluna para ver a explicação.")
+
+        # ── ANÁLISE IA POR ATIVO
+        st.markdown("#### 🤖 Análise contextual por ativo")
+        st.caption("Selecione um ativo para ver a análise gerada por IA combinando dados técnicos e contexto de mercado.")
+
+        opcoes_ia = sorted(list(set(r["Ativo"] for r in rows)))
+        col_ia1, col_ia2 = st.columns([1, 3])
+        with col_ia1:
+            ativo_ia = st.selectbox("Ativo para análise:", opcoes_ia, key="sel_ia")
+        with col_ia2:
+            gerar = st.button("🔍 Gerar análise", key="btn_ia", use_container_width=True)
+
+        if gerar and ativo_ia:
+            row_ia = next((r for r in rows if r["Ativo"] == ativo_ia), None)
+            if row_ia:
+                sinal_ia   = SINAIS.get(ativo_ia, ("NEUTRO",0.5,"LowVol"))[0]
+                rec_ia     = row_ia["Recomendação"]
+                pf_ia      = float(row_ia["PF"]) if row_ia["PF"] != "—" else 1.0
+                hr_ia      = float(row_ia["HR%"])
+                regime_ia  = row_ia["Regime"]
+                retorno_ia = row_ia["Retorno%"]
+                dd_ia      = row_ia["MaxDD%"]
+                hor_ia     = row_ia["Horizonte"]
+
+                with st.spinner(f"Analisando {ativo_ia}..."):
+                    analise = gerar_analise_ia(
+                        ativo_ia, sinal_ia, rec_ia, pf_ia, hr_ia,
+                        regime_ia, retorno_ia, dd_ia, hor_ia
+                    )
+
+                if analise:
+                    sinal_color = "#22c55e" if sinal_ia=="COMPRA" else ("#f87171" if sinal_ia=="VENDA" else "#94a3b8")
+                    st.markdown(f"""
+                    <div style="background:rgba(15,23,42,0.8);border:1px solid #1e3a5f;
+                        border-left:4px solid {sinal_color};border-radius:10px;
+                        padding:16px 20px;margin:8px 0">
+                      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:8px">
+                        📋 {ativo_ia} · {hor_ia} · {rec_ia}
+                      </div>
+                      <div style="font-size:13px;color:#cbd5e1;line-height:1.7">{analise}</div>
+                      <div style="font-size:10px;color:#334155;margin-top:8px">
+                        Gerado por IA · Não constitui recomendação de investimento · {datetime.now().strftime("%d/%m/%Y %H:%M")}
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.info("Análise não disponível no momento. Verifique a conexão com a API.")
+
+        st.divider()
 
         # ── SELEÇÃO DE LINHA → GRÁFICO
         st.markdown("#### 📈 Gráfico de preço")
